@@ -1,0 +1,113 @@
+"0","# Load required libraries"
+"0","library(DBI)"
+"0","library(RPostgres)"
+"0","library(dplyr)"
+"2","
+Attaching package: ‘dplyr’
+
+"
+"2","The following objects are masked from ‘package:stats’:
+
+    filter, lag
+
+"
+"2","The following objects are masked from ‘package:base’:
+
+    intersect, setdiff, setequal, union
+
+"
+"0","library(ggplot2)"
+"0","library(DT)"
+"2","Registered S3 methods overwritten by 'htmltools':
+  method               from         
+  print.html           tools:rstudio
+  print.shiny.tag      tools:rstudio
+  print.shiny.tag.list tools:rstudio
+"
+"2","Registered S3 method overwritten by 'htmlwidgets':
+  method           from         
+  print.htmlwidget tools:rstudio
+"
+"0","library(shiny)"
+"2","
+Attaching package: ‘shiny’
+
+"
+"2","The following objects are masked from ‘package:DT’:
+
+    dataTableOutput, renderDataTable
+
+"
+"0","library(tidyr)"
+"0","library(stringr)"
+"0","library(knitr)"
+"0","library(here)"
+"2","here() starts at E:/dialect_research
+"
+"0","# Source database functions"
+"0","source(here(""scripts/r-script-database-setup.R""))"
+"2","Registered S3 method overwritten by 'rmarkdown':
+  method         from
+  print.paged_df     
+"
+"0","# Connect to database with better error handling"
+"0","db_config <- list("
+"0","  dbname = ""ebsco_repositories"","
+"0","  host = ""localhost"","
+"0","  port = 5432,"
+"0","  user = ""postgres"",      # Update with your actual username"
+"0","  password = ""5232""   # Update with your actual password"
+"0",")"
+"0",""
+"0","# Try to establish connection with error handling"
+"0","tryCatch({"
+"0","  con <- dbConnect("
+"0","    RPostgres::Postgres(),"
+"0","    dbname = db_config$dbname,"
+"0","    host = db_config$host,"
+"0","    port = db_config$port,"
+"0","    user = db_config$user,"
+"0","    password = db_config$password"
+"0","  )"
+"0","  message(""Successfully connected to PostgreSQL database"")"
+"0","}, error = function(e) {"
+"0","  message(""Error connecting to database: "", e$message)"
+"0","  # Create a mock connection to avoid errors during rendering"
+"0","  # This will allow the document to render with warnings instead of failing completely"
+"0","  con <<- NULL"
+"0","})"
+"2","Successfully connected to PostgreSQL database
+"
+"0","# Check if connection is valid before proceeding"
+"0","if (is.null(con)) {"
+"0","  warning(""Database connection failed. Dashboard will show error messages instead of data."")"
+"0","}"
+"0",""
+"0","# Function to safely run database queries"
+"0","safe_query <- function(query, params = NULL) {"
+"0","  if (is.null(con)) {"
+"0","    warning(""Cannot execute query: No database connection"")"
+"0","    # Return empty data frame with expected columns"
+"0","    return(data.frame())"
+"0","  } else {"
+"0","    tryCatch({"
+"0","      if (is.null(params)) {"
+"0","        return(safe_query(con, query))"
+"0","      } else {"
+"0","        return(safe_query(con, query, params = params))"
+"0","      }"
+"0","    }, error = function(e) {"
+"0","      warning(""Query error: "", e$message)"
+"0","      return(data.frame())"
+"0","    })"
+"0","  }"
+"0","}"
+"0",""
+"0","# Function to disconnect when session ends"
+"0","knitr::knit_hooks$set(document = function(x) {"
+"0","  if (exists(""con"") && !is.null(con)) {"
+"0","    dbDisconnect(con)"
+"0","  }"
+"0","  x"
+"0","})"
+"0",""

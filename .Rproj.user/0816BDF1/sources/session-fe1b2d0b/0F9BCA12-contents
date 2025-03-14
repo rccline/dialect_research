@@ -1,0 +1,1005 @@
+---
+title: "EBSCO Repository Tracking Dashboard"
+format: 
+  html:
+    theme: cosmo
+    toc: true
+    code-fold: true
+    page-layout: full
+editor: visual
+execute:
+  echo: false
+  warning: false
+---
+
+## Overview
+
+This dashboard provides an interface for searching, analyzing, and managing your EBSCO bibliographic data and repository holdings. The database helps you track which repositories (libraries, universities, research centers) have the references from your EBSCO export. EBSCO Reference Collection.
+
+```{r setup, include=FALSE}
+# Load required libraries
+library(DBI)
+library(RPostgres)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(shiny)
+library(tidyr)
+library(stringr)
+library(knitr)
+library(here)
+
+# Source database functions
+source(here("scripts/r-script-database-setup.R"))
+
+# Connect to database with better error handling
+db_config <- list(
+  dbname = "ebsco_repositories",
+  host = "localhost",
+  port = 5432,
+  user = "postgres",      # Update with your actual username
+  password = "5232"   # Update with your actual password
+)
+
+# Try to establish connection with error handling
+tryCatch({
+  con <- dbConnect(
+    RPostgres::Postgres(),
+    dbname = db_config$dbname,
+    host = db_config$host,
+    port = db_config$port,
+    user = db_config$user,
+    password = db_config$password
+  )
+  message("Successfully connected to PostgreSQL database")
+}, error = function(e) {
+  message("Error connecting to database: ", e$message)
+  # Create a mock connection to avoid errors during rendering
+  # This will allow the document to render with warnings instead of failing completely
+  con <<- NULL
+})
+
+# Check if connection is valid before proceeding
+if (is.null(con)) {
+  warning("Database connection failed. Dashboard will show error messages instead of data.")
+}
+
+# Function to safely run database queries
+safe_query <- function(query, params = NULL) {
+  if (is.null(con)) {
+    warning("Cannot execute query: No database connection")
+    # Return empty data frame with expected columns
+    return(data.frame())
+  } else {
+    tryCatch({
+      if (is.null(params)) {
+        return(dbGetQuery(con, query))  # CHANGED FROM safe_query to dbGetQuery
+      } else {
+        return(dbGetQuery(con, query, params = params))  # CHANGED FROM safe_query to dbGetQuery
+      }
+    }, error = function(e) {
+      warning("Query error: ", e$message)
+      return(data.frame())
+    })
+  }
+}
+# Function to disconnect when session ends
+knitr::knit_hooks$set(document = function(x) {
+  if (exists("con") && !is.null(con)) {
+    dbDisconnect(con)
+  }
+  x
+})
+
+```
+
+## EBSCO Reference Collection
+
+```{r}
+
+# Get overall stats
+total_refs <- safe_query('SELECT COUNT(*) FROM "References"')
+total_refs <- if(nrow(total_refs) > 0 && "count" %in% names(total_refs)) total_refs$count else 0
+
+total_books <- safe_query('SELECT COUNT(*) FROM "References" WHERE "DocumentType" = \'Book\'')
+total_books <- if(nrow(total_books) > 0 && "count" %in% names(total_books)) total_books$count else 0
+
+total_journals <- safe_query('SELECT COUNT(*) FROM "References" WHERE "DocumentType" = \'Journal Article\'')
+total_journals <- if(nrow(total_journals) > 0 && "count" %in% names(total_journals)) total_journals$count else 0
+
+total_other <- total_refs - total_books - total_journals
+
+# Get publication years
+pub_years <- safe_query('SELECT SUBSTRING(CAST("PublicationDate" AS TEXT), 1, 4) AS year, 
+                        COUNT(*) AS count 
+                        FROM "References" 
+                        WHERE "PublicationDate" IS NOT NULL 
+                        GROUP BY year 
+                        ORDER BY year')
+
+# Subject stats
+subject_counts <- safe_query('
+  SELECT s."SubjectName", COUNT(*) as count 
+  FROM "Subjects" s
+  JOIN "ReferenceSubjects" rs ON s."SubjectID" = rs."SubjectID"
+  GROUP BY s."SubjectName"
+  ORDER BY count DESC
+  LIMIT 10
+')
+```
+
+::: panel-tabset
+## Overview
+
+```{r}
+# Create a summary table
+overview_data <- data.frame(
+  Category = c("Total References", "Books", "Journal Articles", "Other Types"),
+  Count = c(total_refs, total_books, total_journals, total_other)
+)
+
+# Display summary table with kable
+kable(overview_data, col.names = c("Category", "Count"),
+      caption = "Summary of References in Database")
+```
+
+## Publication Years
+
+```{r}
+# Make sure pub_years has the right structure for plotting
+if(nrow(pub_years) == 0 || !all(c("year", "count") %in% names(pub_years))) {
+  # Create a default data frame if the query returned empty or wrong format
+  pub_years <- data.frame(
+    year = c(2020, 2021, 2022, 2023),
+    count = c(0, 0, 0, 0)
+  )
+  message("No publication year data available. Using placeholder data.")
+} else {
+  # Convert year to numeric
+  pub_years$year <- as.numeric(pub_years$year)
+}
+
+# Plot publication years with error handling
+tryCatch({
+  ggplot(pub_years, aes(x = year, y = count)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    theme_minimal() +
+    labs(title = "Publications by Year",
+         x = "Publication Year",
+         y = "Number of References") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}, error = function(e) {
+  # Return a blank plot with error message if plotting fails
+  ggplot() + 
+    annotate("text", x = 0.5, y = 0.5, label = paste("Plot error:", e$message)) +
+    theme_void() +
+    labs(title = "Error: Could not generate publication years plot")
+})
+
+```
+
+## Top Subjects
+
+```{r}
+# Make sure subject_counts has the right structure for plotting
+if(nrow(subject_counts) == 0 || !all(c("SubjectName", "count") %in% names(subject_counts))) {
+  # Create a default data frame if the query returned empty or wrong format
+  subject_counts <- data.frame(
+    SubjectName = c("No data available"),
+    count = c(0)
+  )
+  message("No subject data available. Using placeholder data.")
+}
+
+# Plot top subjects with error handling
+tryCatch({
+  ggplot(subject_counts, aes(x = reorder(SubjectName, count), y = count)) +
+    geom_bar(stat = "identity", fill = "darkgreen") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = "Top 10 Subjects",
+         x = NULL,
+         y = "Number of References")
+}, error = function(e) {
+  # Return a blank plot with error message if plotting fails
+  ggplot() + 
+    annotate("text", x = 0.5, y = 0.5, label = paste("Plot error:", e$message)) +
+    theme_void() +
+    labs(title = "Error: Could not generate subjects plot")
+})
+```
+:::
+
+## Search References
+
+```{r search-ui1, eval=FALSE}
+# Create search UI
+shinyApp(
+  ui = fluidPage(
+    tags$head(
+      tags$style(HTML("
+        .dataTables_wrapper { margin-bottom: 20px; }
+        .form-group { margin-bottom: 10px; }
+      "))
+    ),
+    fluidRow(
+      column(3, 
+             textInput("title", "Title:", ""),
+             textInput("author", "Author/Contributors:", "")),
+      column(3,
+             textInput("identifier", "ISBN/ISSN/DOI:", ""),
+             textInput("subject", "Subject:", "")),
+      column(6,
+             br(),
+             actionButton("search", "Search", class = "btn-primary"),
+             actionButton("clear", "Clear", class = "btn-secondary"),
+             downloadButton("downloadResults", "Download Results"))
+    ),
+    hr(),
+    DTOutput("resultsTable"),
+    hr(),
+    conditionalPanel(
+      condition = "output.refSelected",
+      fluidRow(
+        column(12, h4("Holdings Information")),
+        column(12, 
+               p("Select a reference in the table above to see its repository holdings."),
+               DTOutput("holdingsTable"))
+      )
+    )
+  ),
+  
+  server = function(input, output, session) {
+    # Reactive values
+    values <- reactiveValues(
+      results = NULL,
+      selected_ref_id = NULL
+    )
+    
+    # Search function
+    observeEvent(input$search, {
+      search_params <- list(
+        title = input$title,
+        author = input$author,
+        identifier = input$identifier,
+        subject = input$subject
+      )
+      
+      # Get results
+      results <- search_references(con, search_params)
+      values$results <- results
+      
+      # Reset selected reference
+      values$selected_ref_id <- NULL
+    })
+    
+    # Clear search form
+    observeEvent(input$clear, {
+      updateTextInput(session, "title", value = "")
+      updateTextInput(session, "author", value = "")
+      updateTextInput(session, "identifier", value = "")
+      updateTextInput(session, "subject", value = "")
+      values$results <- NULL
+      values$selected_ref_id <- NULL
+    })
+    
+    # Render results table
+    output$resultsTable <- renderDT({
+      if (is.null(values$results) || nrow(values$results) == 0) {
+        return(NULL)
+      }
+      
+      # Format the data
+      display_data <- values$results %>%
+        mutate(
+          Year = substr(CoverDate, 1, 4),
+          Identifiers = paste0(
+            ifelse(!is.na(ISBN) & ISBN != "", paste0("ISBN: ", ISBN), ""),
+            ifelse(!is.na(ISSN) & ISSN != "", ifelse(ISBN != "", "; ", ""), ""),
+            ifelse(!is.na(ISSN) & ISSN != "", paste0("ISSN: ", ISSN), ""),
+            ifelse(!is.na(DOI) & DOI != "", ifelse(ISBN != "" | ISSN != "", "; ", ""), ""),
+            ifelse(!is.na(DOI) & DOI != "", paste0("DOI: ", DOI), "")
+          )
+        ) %>%
+        select(ReferenceID, Title, Contributors, DocumentType, Publisher, Year, Identifiers)
+      
+      datatable(
+        display_data,
+        selection = "single",
+        options = list(
+          pageLength = 10,
+          scrollX = TRUE,
+          columnDefs = list(
+            list(targets = 0, visible = FALSE)  # Hide ReferenceID column
+          )
+        ),
+        colnames = c("ID", "Title", "Authors", "Type", "Publisher", "Year", "Identifiers")
+      )
+    })
+    
+    # Handle row selection
+    observeEvent(input$resultsTable_rows_selected, {
+      selected_row <- input$resultsTable_rows_selected
+      if (length(selected_row) > 0) {
+        values$selected_ref_id <- values$results$ReferenceID[selected_row]
+      } else {
+        values$selected_ref_id <- NULL
+      }
+    })
+    
+    # Holdings table
+    output$holdingsTable <- renderDT({
+      if (is.null(values$selected_ref_id)) {
+        return(NULL)
+      }
+      
+      # Get holdings for the selected reference
+      holdings <- get_reference_holdings(con, values$selected_ref_id)
+      
+      if (is.null(holdings) || nrow(holdings) == 0) {
+        return(datatable(
+          data.frame(Message = "No holdings found for this reference"),
+          options = list(dom = 't'),
+          rownames = FALSE
+        ))
+      }
+      
+      # Format date
+      holdings <- holdings %>%
+        mutate(VerificationDate = format(as.Date(VerificationDate), "%Y-%m-%d"))
+      
+      datatable(
+        holdings %>% select(-HoldingID),
+        options = list(
+          pageLength = 5,
+          dom = 'tip'
+        ),
+        colnames = c("Repository", "Format", "Call Number", "Location", 
+                     "Access Restriction", "Verified", "Notes")
+      )
+    })
+    
+    # Flag to show holdings section
+    output$refSelected <- reactive({
+      return(!is.null(values$selected_ref_id))
+    })
+    outputOptions(output, "refSelected", suspendWhenHidden = FALSE)
+    
+    # Download handler
+    output$downloadResults <- downloadHandler(
+      filename = function() {
+        paste0("ebsco-search-results-", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv")
+      },
+      content = function(file) {
+        if (is.null(values$results)) {
+          write.csv(data.frame(Message = "No search results to download"), file, row.names = FALSE)
+        } else {
+          write.csv(values$results, file, row.names = FALSE)
+        }
+      }
+    )
+  },
+  
+  options = list(height = 800)
+)
+
+```
+
+## Repository Management
+
+```{r search-ui2, eval=FALSE}
+# Create repository management UI
+shinyApp(
+  ui = fluidPage(
+    tags$head(
+      tags$style(HTML("
+        .dataTables_wrapper { margin-bottom: 20px; }
+        .form-group { margin-bottom: 10px; }
+      "))
+    ),
+    fluidRow(
+      column(12, h4("Repository List")),
+      column(12, 
+             actionButton("addRepo", "Add New Repository", class = "btn-primary"),
+             actionButton("refreshRepos", "Refresh List", class = "btn-info"))
+    ),
+    br(),
+    DTOutput("repositoriesTable"),
+    hr(),
+    conditionalPanel(
+      condition = "input.addRepo > 0 || output.editMode",
+      fluidRow(
+        column(12, h4(textOutput("formTitle"))),
+        column(4,
+               textInput("repoName", "Repository Name:*", ""),
+               textInput("repoType", "Repository Type:", ""),
+               textInput("institution", "Institution:", "")),
+        column(4,
+               textInput("city", "City:", ""),
+               textInput("state", "State/Province:", ""),
+               textInput("country", "Country:", "")),
+        column(4,
+               textInput("website", "Website URL:", ""),
+               textInput("email", "Contact Email:", ""),
+               textInput("phone", "Contact Phone:", ""))
+      ),
+      fluidRow(
+        column(8, 
+               textAreaInput("notes", "Notes:", "", height = "100px")),
+        column(4,
+               br(), br(),
+               actionButton("saveRepo", "Save Repository", class = "btn-success"),
+               actionButton("cancelRepo", "Cancel", class = "btn-secondary"))
+      )
+    )
+  ),
+  
+  server = function(input, output, session) {
+    # Reactive values
+    values <- reactiveValues(
+      repositories = NULL,
+      edit_mode = FALSE,
+      edit_id = NULL
+    )
+    
+    # Load repositories on initialization
+    observe({
+      if (is.null(values$repositories)) {
+        refreshRepositories()
+      }
+    })
+    
+    # Function to refresh repositories list
+    refreshRepositories <- function() {
+      values$repositories <- list_repositories(con)
+    }
+    
+    # Refresh button click
+    observeEvent(input$refreshRepos, {
+      refreshRepositories()
+    })
+    
+    # Display repositories table
+    output$repositoriesTable <- renderDT({
+      req(values$repositories)
+      
+      datatable(
+        values$repositories,
+        selection = "single",
+        options = list(
+          pageLength = 10,
+          scrollX = TRUE,
+          columnDefs = list(
+            list(targets = 0, visible = FALSE)  # Hide RepositoryID column
+          )
+        ),
+        colnames = c("ID", "Name", "Institution", "City", "State", "Country")
+      )
+    })
+    
+    # Add repository button
+    observeEvent(input$addRepo, {
+      values$edit_mode <- FALSE
+      values$edit_id <- NULL
+      
+      # Clear form fields
+      updateTextInput(session, "repoName", value = "")
+      updateTextInput(session, "repoType", value = "")
+      updateTextInput(session, "institution", value = "")
+      updateTextInput(session, "city", value = "")
+      updateTextInput(session, "state", value = "")
+      updateTextInput(session, "country", value = "")
+      updateTextInput(session, "website", value = "")
+      updateTextInput(session, "email", value = "")
+      updateTextInput(session, "phone", value = "")
+      updateTextAreaInput(session, "notes", value = "")
+    })
+    
+    # Form title
+    output$formTitle <- renderText({
+      if (values$edit_mode) {
+        "Edit Repository"
+      } else {
+        "Add New Repository"
+      }
+    })
+    
+    # Edit mode flag
+    output$editMode <- reactive({
+      return(values$edit_mode)
+    })
+    outputOptions(output, "editMode", suspendWhenHidden = FALSE)
+    
+    # Row selection for edit
+    observeEvent(input$repositoriesTable_rows_selected, {
+      selected_row <- input$repositoriesTable_rows_selected
+      if (length(selected_row) > 0) {
+        # Get selected repository details
+        values$edit_mode <- TRUE
+        values$edit_id <- values$repositories$RepositoryID[selected_row]
+        
+        # Query for full repository details
+        repo_details <- safe_query(con, '
+          SELECT * FROM "Repositories"
+          WHERE "RepositoryID" = $1
+        ', params = list(values$edit_id))
+        
+        if (nrow(repo_details) > 0) {
+          # Populate form fields
+          updateTextInput(session, "repoName", value = repo_details$RepositoryName)
+          updateTextInput(session, "repoType", value = ifelse(is.na(repo_details$RepositoryType), "", repo_details$RepositoryType))
+          updateTextInput(session, "institution", value = ifelse(is.na(repo_details$Institution), "", repo_details$Institution))
+          updateTextInput(session, "city", value = ifelse(is.na(repo_details$City), "", repo_details$City))
+          updateTextInput(session, "state", value = ifelse(is.na(repo_details$State), "", repo_details$State))
+          updateTextInput(session, "country", value = ifelse(is.na(repo_details$Country), "", repo_details$Country))
+          updateTextInput(session, "website", value = ifelse(is.na(repo_details$WebsiteURL), "", repo_details$WebsiteURL))
+          updateTextInput(session, "email", value = ifelse(is.na(repo_details$ContactEmail), "", repo_details$ContactEmail))
+          updateTextInput(session, "phone", value = ifelse(is.na(repo_details$ContactPhone), "", repo_details$ContactPhone))
+          updateTextAreaInput(session, "notes", value = ifelse(is.na(repo_details$Notes), "", repo_details$Notes))
+        }
+      }
+    })
+    
+    # Save repository
+    observeEvent(input$saveRepo, {
+      # Validate required fields
+      if (input$repoName == "") {
+        showNotification("Repository Name is required", type = "error")
+        return()
+      }
+      
+      # Prepare repository data
+      repo_data <- list(
+        name = input$repoName,
+        type = input$repoType,
+        institution = input$institution,
+        city = input$city,
+        state = input$state,
+        country = input$country,
+        website = input$website,
+        email = input$email,
+        phone = input$phone,
+        notes = input$notes
+      )
+      
+      if (values$edit_mode) {
+        # Update existing repository
+        tryCatch({
+          query <- '
+            UPDATE "Repositories"
+            SET "RepositoryName" = $1, "RepositoryType" = $2, "Institution" = $3,
+                "City" = $4, "State" = $5, "Country" = $6, "WebsiteURL" = $7,
+                "ContactEmail" = $8, "ContactPhone" = $9, "Notes" = $10
+            WHERE "RepositoryID" = $11
+          '
+          
+          dbExecute(con, query, params = c(
+            as.list(repo_data),
+            values$edit_id
+          ))
+          
+          showNotification("Repository updated successfully", type = "message")
+          values$edit_mode <- FALSE
+          values$edit_id <- NULL
+          refreshRepositories()
+        }, error = function(e) {
+          showNotification(paste("Error updating repository:", e$message), type = "error")
+        })
+      } else {
+        # Add new repository
+        result <- add_repository(con, repo_data)
+        if (!is.null(result)) {
+          showNotification("Repository added successfully", type = "message")
+          refreshRepositories()
+        } else {
+          showNotification("Failed to add repository", type = "error")
+        }
+      }
+    })
+    
+    # Cancel button
+    observeEvent(input$cancelRepo, {
+      values$edit_mode <- FALSE
+      values$edit_id <- NULL
+    })
+  },
+  
+  options = list(height = 800)
+)
+```
+
+## Holdings Management
+
+```{r search-ui3, eval=FALSE}
+ # Create holdings management UI
+shinyApp(
+  ui = fluidPage(
+    tags$head(
+      tags$style(HTML("
+        .dataTables_wrapper { margin-bottom: 20px; }
+        .form-group { margin-bottom: 10px; }
+      "))
+    ),
+    fluidRow(
+      column(12, h4("Manage Repository Holdings")),
+      column(12, 
+             p("First search for a reference, then add or edit its repository holdings."))
+    ),
+    hr(),
+    fluidRow(
+      column(3, 
+             textInput("holdingsTitle", "Title:", ""),
+             textInput("holdingsIdentifier", "ISBN/ISSN/DOI:", "")),
+      column(3,
+             actionButton("holdingsSearch", "Search References", class = "btn-primary"),
+             actionButton("holdingsClear", "Clear", class = "btn-secondary"))
+    ),
+    hr(),
+    DTOutput("holdingsRefsTable"),
+    hr(),
+    conditionalPanel(
+      condition = "output.holdingsRefSelected",
+      fluidRow(
+        column(12, h4("Current Holdings")),
+        column(12, 
+               actionButton("addHolding", "Add New Holding", class = "btn-success")),
+        column(12, DTOutput("currentHoldingsTable"))
+      ),
+      conditionalPanel(
+        condition = "input.addHolding > 0 || output.holdingsEditMode",
+        hr(),
+        fluidRow(
+          column(12, h4(textOutput("holdingsFormTitle"))),
+          column(4,
+                 selectInput("holdingsRepo", "Repository:*", choices = NULL),
+                 textInput("holdingsFormat", "Format:", ""),
+                 textInput("holdingsCallNumber", "Call Number:", "")),
+          column(4,
+                 textInput("holdingsLocation", "Location Note:", ""),
+                 textInput("holdingsAccess", "Access Restriction:", ""),
+                 dateInput("holdingsVerification", "Verification Date:", value = Sys.Date())),
+          column(4,
+                 textAreaInput("holdingsNotes", "Notes:", "", height = "100px"),
+                 br(),
+                 actionButton("saveHolding", "Save Holding", class = "btn-success"),
+                 actionButton("cancelHolding", "Cancel", class = "btn-secondary"))
+        )
+      )
+    )
+  ),
+  
+  server = function(input, output, session) {
+    # Reactive values
+    values <- reactiveValues(
+      ref_results = NULL,
+      selected_ref_id = NULL,
+      current_holdings = NULL,
+      holdings_edit_mode = FALSE,
+      holdings_edit_id = NULL
+    )
+    
+    # Get repositories for dropdown
+    repositories <- reactive({
+      repo_list <- safe_query(con, 'SELECT "RepositoryID", "RepositoryName" FROM "Repositories" ORDER BY "RepositoryName"')
+      repos <- setNames(repo_list$RepositoryID, repo_list$RepositoryName)
+      return(repos)
+    })
+    
+    # Update repository dropdown
+    observe({
+      updateSelectInput(session, "holdingsRepo", choices = repositories())
+    })
+    
+    # Search for references
+    observeEvent(input$holdingsSearch, {
+      # Get search parameters
+      search_params <- list(
+        title = input$holdingsTitle,
+        identifier = input$holdingsIdentifier,
+        author = "",
+        subject = ""
+      )
+      
+      # Perform search
+      values$ref_results <- search_references(con, search_params)
+      
+      # Reset selection
+      values$selected_ref_id <- NULL
+      values$current_holdings <- NULL
+    })
+    
+    # Clear search form
+    observeEvent(input$holdingsClear, {
+      updateTextInput(session, "holdingsTitle", value = "")
+      updateTextInput(session, "holdingsIdentifier", value = "")
+      values$ref_results <- NULL
+      values$selected_ref_id <- NULL
+      values$current_holdings <- NULL
+    })
+    
+    # Render reference results
+    output$holdingsRefsTable <- renderDT({
+      if (is.null(values$ref_results) || nrow(values$ref_results) == 0) {
+        return(NULL)
+      }
+      
+      # Format the data
+      display_data <- values$ref_results %>%
+        mutate(
+          Year = substr(CoverDate, 1, 4),
+          Identifiers = paste0(
+            ifelse(!is.na(ISBN) & ISBN != "", paste0("ISBN: ", ISBN), ""),
+            ifelse(!is.na(ISSN) & ISSN != "", ifelse(ISBN != "", "; ", ""), ""),
+            ifelse(!is.na(ISSN) & ISSN != "", paste0("ISSN: ", ISSN), ""),
+            ifelse(!is.na(DOI) & DOI != "", ifelse(ISBN != "" | ISSN != "", "; ", ""), ""),
+            ifelse(!is.na(DOI) & DOI != "", paste0("DOI: ", DOI), "")
+          )
+        ) %>%
+        select(ReferenceID, Title, DocumentType, Year, Identifiers)
+      
+      datatable(
+        display_data,
+        selection = "single",
+        options = list(
+          pageLength = 5,
+          scrollX = TRUE,
+          columnDefs = list(
+            list(targets = 0, visible = FALSE)  # Hide ReferenceID column
+          )
+        ),
+        colnames = c("ID", "Title", "Type", "Year", "Identifiers")
+      )
+    })
+    
+    # Handle reference selection
+    observeEvent(input$holdingsRefsTable_rows_selected, {
+      selected_row <- input$holdingsRefsTable_rows_selected
+      if (length(selected_row) > 0) {
+        values$selected_ref_id <- values$ref_results$ReferenceID[selected_row]
+        refreshHoldings()
+      } else {
+        values$selected_ref_id <- NULL
+        values$current_holdings <- NULL
+      }
+    })
+    
+    # Refresh holdings
+    refreshHoldings <- function() {
+      if (!is.null(values$selected_ref_id)) {
+        values$current_holdings <- get_reference_holdings(con, values$selected_ref_id)
+      }
+    }
+    
+    # Reference selected flag
+    output$holdingsRefSelected <- reactive({
+      return(!is.null(values$selected_ref_id))
+    })
+    outputOptions(output, "holdingsRefSelected", suspendWhenHidden = FALSE)
+    
+    # Holdings edit mode flag
+    output$holdingsEditMode <- reactive({
+      return(values$holdings_edit_mode)
+    })
+    outputOptions(output, "holdingsEditMode", suspendWhenHidden = FALSE)
+    
+    # Current holdings table
+    output$currentHoldingsTable <- renderDT({
+      if (is.null(values$current_holdings) || nrow(values$current_holdings) == 0) {
+        return(datatable(
+          data.frame(Message = "No holdings found for this reference"),
+          options = list(dom = 't'),
+          rownames = FALSE
+        ))
+      }
+      
+      datatable(
+        values$current_holdings,
+        selection = "single",
+        options = list(
+          pageLength = 5,
+          scrollX = TRUE,
+          columnDefs = list(
+            list(targets = 0, visible = FALSE)  # Hide HoldingID column
+          )
+        ),
+        colnames = c("ID", "Repository", "Format", "Call Number", "Location", 
+                     "Access Restriction", "Verified", "Notes")
+      )
+    })
+    
+    # Add holding button
+    observeEvent(input$addHolding, {
+      values$holdings_edit_mode <- FALSE
+      values$holdings_edit_id <- NULL
+      
+      # Clear form fields
+      updateSelectInput(session, "holdingsRepo", selected = NULL)
+      updateTextInput(session, "holdingsFormat", value = "")
+      updateTextInput(session, "holdingsCallNumber", value = "")
+      updateTextInput(session, "holdingsLocation", value = "")
+      updateTextInput(session, "holdingsAccess", value = "")
+      updateDateInput(session, "holdingsVerification", value = Sys.Date())
+      updateTextAreaInput(session, "holdingsNotes", value = "")
+    })
+    
+    # Holdings form title
+    output$holdingsFormTitle <- renderText({
+      if (values$holdings_edit_mode) {
+        "Edit Holding"
+      } else {
+        "Add New Holding"
+      }
+    })
+    
+    # Save holding
+    observeEvent(input$saveHolding, {
+      # Validate required fields
+      if (is.null(input$holdingsRepo) || input$holdingsRepo == "") {
+        showNotification("Repository selection is required", type = "error")
+        return()
+      }
+      
+      # Prepare holding data
+      holding_data <- list(
+        reference_id = values$selected_ref_id,
+        repository_id = as.integer(input$holdingsRepo),
+        format = input$holdingsFormat,
+        call_number = input$holdingsCallNumber,
+        location_note = input$holdingsLocation,
+        access_restriction = input$holdingsAccess,
+        verification_date = input$holdingsVerification,
+        notes = input$holdingsNotes
+      )
+      
+      if (values$holdings_edit_mode) {
+        # Update existing holding
+        tryCatch({
+          query <- '
+            UPDATE "Holdings"
+            SET "RepositoryID" = $1, "Format" = $2, "CallNumber" = $3,
+                "LocationNote" = $4, "AccessRestriction" = $5, 
+                "VerificationDate" = $6, "Notes" = $7
+            WHERE "HoldingID" = $8
+          '
+          
+          dbExecute(con, query, params = c(
+            list(
+              holding_data$repository_id,
+              holding_data$format,
+              holding_data$call_number,
+              holding_data$location_note,
+              holding_data$access_restriction,
+              holding_data$verification_date,
+              holding_data$notes,
+              values$holdings_edit_id
+            )
+          ))
+          
+          showNotification("Holding updated successfully", type = "message")
+          values$holdings_edit_mode <- FALSE
+          values$holdings_edit_id <- NULL
+          refreshHoldings()
+        }, error = function(e) {
+          showNotification(paste("Error updating holding:", e$message), type = "error")
+        })
+      } else {
+        # Add new holding
+        result <- add_holding(con, holding_data)
+        if (!is.null(result)) {
+          showNotification("Holding added successfully", type = "message")
+          refreshHoldings()
+        } else {
+          showNotification("Failed to add holding", type = "error")
+        }
+      }
+    })
+    
+    # Cancel holding
+    observeEvent(input$cancelHolding, {
+      values$holdings_edit_mode <- FALSE
+      values$holdings_edit_id <- NULL
+    })
+    
+    # Handle holding selection for edit
+    observeEvent(input$currentHoldingsTable_rows_selected, {
+      selected_row <- input$currentHoldingsTable_rows_selected
+      if (length(selected_row) > 0 && !is.null(values$current_holdings)) {
+        # Get selected holding details
+        values$holdings_edit_mode <- TRUE
+        values$holdings_edit_id <- values$current_holdings$HoldingID[selected_row]
+        
+        # Query for full holding details
+        holding_details <- safe_query(con, '
+          SELECT * FROM "Holdings"
+          WHERE "HoldingID" = $1
+        ', params = list(values$holdings_edit_id))
+        
+        if (nrow(holding_details) > 0) {
+          # Populate form fields
+          updateSelectInput(session, "holdingsRepo", selected = as.character(holding_details$RepositoryID))
+          updateTextInput(session, "holdingsFormat", value = ifelse(is.na(holding_details$Format), "", holding_details$Format))
+          updateTextInput(session, "holdingsCallNumber", value = ifelse(is.na(holding_details$CallNumber), "", holding_details$CallNumber))
+          updateTextInput(session, "holdingsLocation", value = ifelse(is.na(holding_details$LocationNote), "", holding_details$LocationNote))
+          updateTextInput(session, "holdingsAccess", value = ifelse(is.na(holding_details$AccessRestriction), "", holding_details$AccessRestriction))
+          
+          if (!is.na(holding_details$VerificationDate)) {
+            updateDateInput(session, "holdingsVerification", value = as.Date(holding_details$VerificationDate))
+          }
+          
+          updateTextAreaInput(session, "holdingsNotes", value = ifelse(is.na(holding_details$Notes), "", holding_details$Notes))
+        }
+      }
+    })
+  },
+  
+  options = list(height = 800)
+)
+
+```
+
+## Data Import/Export
+
+This section provides tools for importing your EBSCO data and managing your repository database.
+
+## Import EBSCO Data
+
+```{r}
+
+actionButton("importBtn", "Show Import Instructions", class = "btn-info")
+```
+
+::: {#importInstructions style="display: none; background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 10px;"}
+### Step-by-Step Import Instructions
+
+**Export data from EBSCO**:
+
+In EBSCO, perform your search and select the references you want to track Click on the "Export" button and choose CSV format Save the file to your computer
+
+### Run the import script:
+
+**Open RStudio** Run the following R code, replacing the file path with your CSV file location:
+
+```{r}
+# Load the database functions
+source(here("scripts/r-script-database-setup.R"))
+
+# Connect to database
+con <- connect_to_db()
+
+# Import EBSCO data
+import_ebsco_csv(con, "path/to/your/ebsco-export.csv")
+
+# Disconnect when done
+dbDisconnect(con)
+```
+
+**Verify import**:
+
+Use the Search tab to confirm your data was imported Add repositories and holdings as needed
+:::
+
+```{js}
+$(document).ready(function() {
+  $("#importBtn").click(function() {
+    $("#importInstructions").toggle();
+    
+    if ($("#importBtn").text() === "Show Import Instructions") {
+      $("#importBtn").text("Hide Import Instructions");
+    } else {
+      $("#importBtn").text("Show Import Instructions");
+    }
+  });
+});
+```
+
+## Database Backup/Restore
+
+Regular backups of your repository database are recommended. You can use PostgreSQL's built-in tools: Save this entire code (including the previous part I sent) into a file named `ebsco-dashboard.qmd` in your project folder. Then, you can render it in RStudio by:
+
+1.  Opening the file in RStudio
+2.  Clicking the "Render" button in the editor toolbar
+3.  Alternatively, running this command in the console: `quarto::quarto_preview("ebsco-dashboard.qmd")`
+
+Make sure to: 1. Update the password in the `db_config` object to match your PostgreSQL password 2. Check that the path to your database functions script is correct (it's referencing `here("scripts/r-script-database-setup.R")`)
+
+The dashboard should now connect to your database, display statistics about your references, and provide interfaces for searching references, managing repositories, and tracking holdings.

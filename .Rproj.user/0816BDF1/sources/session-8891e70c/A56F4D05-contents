@@ -1,0 +1,183 @@
+##%######################################################%##
+#                                                          #
+####                  worldcat_lookup                   ####
+#                                                          #
+##%######################################################%##
+
+library(httr)
+library(xml2)
+library(dplyr)
+library(DBI)
+library(RPostgres)
+library(here)
+
+# Database connection
+source(here("scripts/r-script-database-setup.R"))
+con <- connect_to_db()
+
+# WorldCat API key (you'll need to register for this)
+# Register at: https://www.oclc.org/developer/api/keys.en.html
+worldcat_api_key <- "your_api_key_here"
+
+# Function to search WorldCat by ISBN
+search_worldcat_by_isbn <- function(isbn, api_key = worldcat_api_key) {
+  # Clean ISBN
+  isbn <- gsub("[^0-9X]", "", isbn)
+  
+  # Create API URL
+  url <- paste0("http://www.worldcat.org/webservices/catalog/content/isbn/", isbn, 
+                "?wskey=", api_key, "&format=xml")
+  
+  message("Searching WorldCat for ISBN: ", isbn)
+  
+  # Make API request
+  response <- GET(url)
+  
+  if (status_code(response) == 200) {
+    xml_content <- content(response, "text", encoding = "UTF-8")
+    doc <- read_xml(xml_content)
+    
+    # Extract library locations
+    libraries <- xml_find_all(doc, "//library")
+    
+    results <- data.frame(
+      isbn = isbn,
+      library_name = character(),
+      location = character(),
+      stringsAsFactors = FALSE
+    )
+    
+    for (lib in libraries) {
+      name <- xml_text(xml_find_first(lib, ".//name"))
+      location <- xml_text(xml_find_first(lib, ".//location"))
+      
+      results <- rbind(results, data.frame(
+        isbn = isbn,
+        library_name = name,
+        location = location,
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    return(results)
+  } else {
+    message("Error: ", status_code(response), " - ", content(response, "text"))
+    return(data.frame())
+  }
+}
+
+# Function to process all references in your database
+process_all_references <- function() {
+  # Get all references with ISBNs
+  references <- dbGetQuery(con, 'SELECT "ReferenceID", "Title", "ISBN" FROM "References" WHERE "ISBN" IS NOT NULL')
+  
+  for (i in 1:nrow(references)) {
+    ref <- references[i, ]
+    isbns <- strsplit(ref$ISBN, ";")[[1]]
+    
+    for (isbn in isbns) {
+      isbn <- trimws(isbn)
+      if (nchar(isbn) > 0) {
+        # Search WorldCat
+        results <- search_worldcat_by_isbn(isbn)
+        
+        if (nrow(results) > 0) {
+          message("Found ", nrow(results), " libraries for '", ref$Title, "' with ISBN ", isbn)
+          
+          # Process each library found
+          for (j in 1:nrow(results)) {
+            library_info <- results[j, ]
+            
+            # Check if repository exists, add if not
+            repo_id <- add_or_get_repository(library_info$library_name, library_info$location)
+            
+            # Add holding
+            if (!is.null(repo_id)) {
+              add_holding_if_not_exists(ref$ReferenceID, repo_id, "Print")
+            }
+          }
+        } else {
+          message("No libraries found for '", ref$Title, "' with ISBN ", isbn)
+        }
+      }
+    }
+    
+    # Add a delay to be nice to the API
+    Sys.sleep(1)
+  }
+}
+
+# Helper function to add a repository or get its ID if it exists
+add_or_get_repository <- function(name, location) {
+  # Split location into city, state, country (if available)
+  loc_parts <- strsplit(location, ",")[[1]]
+  city <- if(length(loc_parts) > 0) trimws(loc_parts[1]) else NA
+  state <- if(length(loc_parts) > 1) trimws(loc_parts[2]) else NA
+  country <- if(length(loc_parts) > 2) trimws(loc_parts[3]) else NA
+  
+  # Check if repository exists
+  query <- 'SELECT "RepositoryID" FROM "Repositories" WHERE "RepositoryName" = $1'
+  result <- dbGetQuery(con, query, params = list(name))
+  
+  if (nrow(result) > 0) {
+    return(result$RepositoryID[1])
+  } else {
+    # Add new repository
+    repo_data <- list(
+      name = name,
+      type = "Library",
+      institution = name,
+      city = city,
+      state = state, 
+      country = country,
+      website = NA,
+      email = NA,
+      phone = NA,
+      notes = paste0("Added automatically via WorldCat lookup on ", Sys.Date())
+    )
+    
+    return(add_repository(con, repo_data))
+  }
+}
+
+# Helper function to add a holding if it doesn't exist
+add_holding_if_not_exists <- function(ref_id, repo_id, format = "Print") {
+  # Check if holding exists
+  query <- 'SELECT COUNT(*) as count FROM "Holdings" 
+           WHERE "ReferenceID" = $1 AND "RepositoryID" = $2 AND "Format" = $3'
+  result <- dbGetQuery(con, query, params = list(ref_id, repo_id, format))
+  
+  if (result$count == 0) {
+    # Add new holding
+    holding_data <- list(
+      reference_id = ref_id,
+      repository_id = repo_id,
+      format = format,
+      call_number = NA,
+      location_note = NA,
+      access_restriction = NA,
+      verification_date = Sys.Date(),
+      notes = "Added via WorldCat API lookup"
+    )
+    
+    add_holding(con, holding_data)
+    return(TRUE)
+  }
+  
+  return(FALSE)
+}
+
+# Example: Process a single ISBN for testing
+test_isbn <- function(isbn) {
+  results <- search_worldcat_by_isbn(isbn)
+  print(results)
+}
+
+# Example usage (uncomment to run)
+# test_isbn("9780415714044")  # Replace with an ISBN from your collection
+
+# Uncomment to process all references with ISBNs
+# process_all_references()
+
+# Don't forget to close the connection when done
+dbDisconnect(con)

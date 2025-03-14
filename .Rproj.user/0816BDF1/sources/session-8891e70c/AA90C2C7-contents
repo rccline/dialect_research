@@ -1,0 +1,20 @@
+# Which repositories have the most holdings?
+repository_counts <- dbGetQuery(con, '
+  SELECT rep."RepositoryName", COUNT(*) as total_holdings
+  FROM "Holdings" h
+  JOIN "Repositories" rep ON h."RepositoryID" = rep."RepositoryID"
+  GROUP BY rep."RepositoryName"
+  ORDER BY total_holdings DESC
+')
+View(repository_counts)
+
+# Which references are held by the most repositories?
+popular_references <- dbGetQuery(con, '
+  SELECT r."Title", COUNT(DISTINCT h."RepositoryID") as repository_count
+  FROM "Holdings" h
+  JOIN "References" r ON h."ReferenceID" = r."ReferenceID"
+  GROUP BY r."Title"
+  ORDER BY repository_count DESC
+  LIMIT 20
+')
+View(popular_references)
